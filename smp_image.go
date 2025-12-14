@@ -94,7 +94,7 @@ func newChunker(client *SMPClient, data []byte, chunkSize uint32) *imgChunker {
 		data:      data,
 		chunkSize: chunkSize,
 
-		sema:         make(chan struct{}, 16),
+		sema:         make(chan struct{}, 5),
 		maxWindows:   1,
 		chunkOffsets: make([]uint32, 0, len(data)/int(chunkSize)),
 	}
@@ -118,16 +118,17 @@ func (c *imgChunker) run(ctx context.Context, cb func(frame FirmwareUploadReques
 
 	var err error
 	for i, chunkOffset := range c.chunkOffsets {
-		slog.Info("wait for sema")
 		if !c.tryUseWindow(ctx) {
 			break
 		}
 
 		c.wg.Add(1)
+		c.currentWindows.Add(1)
 
 		go func(i int) {
 			defer func() {
-				slog.Info("freed sema")
+				c.wg.Done()
+				c.currentWindows.Add(^uint32(0))
 				c.freeWindow()
 			}()
 
@@ -149,15 +150,12 @@ func (c *imgChunker) run(ctx context.Context, cb func(frame FirmwareUploadReques
 		}(i)
 	}
 
-	slog.Info("wait for routines")
 	c.wg.Wait()
 
 	return err
 }
 
 func (c *imgChunker) sendChunk(ctx context.Context, offset uint32, cb func(frame FirmwareUploadRequest)) error {
-	defer c.wg.Done()
-
 	uintDataLen := uint32(len(c.data))
 
 	var shaVal []byte
@@ -173,7 +171,7 @@ func (c *imgChunker) sendChunk(ctx context.Context, offset uint32, cb func(frame
 	req := BuildFirmwareUploadRequest(0, uintDataLen, offset, shaVal, c.data[offset:nextPtr], false)
 	uploadData, err := EncodeCBOR(req)
 	if err != nil {
-		return fmt.Errorf("failed to encode firmware upload request: %v", err)
+		return fmt.Errorf("failed to encode firmware upload request: %w", err)
 	}
 
 	const maxTries = 3
@@ -191,23 +189,23 @@ func (c *imgChunker) sendChunk(ctx context.Context, offset uint32, cb func(frame
 		response, err := c.client.transport.Send(ctx, frame)
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
-			if tries == 0 {
+			if tries == 0 && c.currentWindows.Load() > 1 {
 				c.tryUseWindow(ctx)
 			}
 			continue
 		case err != nil:
-			return fmt.Errorf("failed to send firmware upload frame: %v", err)
+			return fmt.Errorf("failed to send firmware upload frame: %w", err)
 		}
 
 		// Validate response
 		if err := response.ValidateFrame(); err != nil {
-			return fmt.Errorf("invalid firmware upload response frame: %v", err)
+			return fmt.Errorf("invalid firmware upload response frame: %w", err)
 		}
 
 		// Parse response
 		uploadResp, err := ParseFirmwareUploadResponse(response.Data)
 		if err != nil {
-			return fmt.Errorf("failed to parse firmware upload response: %v", err)
+			return fmt.Errorf("failed to parse firmware upload response: %w", err)
 		}
 
 		// Check for errors in response
