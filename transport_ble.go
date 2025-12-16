@@ -1,11 +1,10 @@
-package simple_smp
+package smp
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"sync"
 	"time"
 
@@ -17,6 +16,8 @@ var characteristicSMPUUID, _ = bluetooth.ParseUUID("da2e7828-fbce-4e01-ae9e-2611
 var _ Transport = (*BLETransport)(nil)
 
 type BLETransport struct {
+	cfg BLETransportConfig
+
 	adapter *bluetooth.Adapter
 	device  bluetooth.Device
 
@@ -28,19 +29,25 @@ type BLETransport struct {
 	cbsMu sync.Mutex
 }
 
-func NewBLETransport() (*BLETransport, error) {
+type BLETransportConfig struct {
+	Name    string
+	Address string
+}
+
+func NewBLETransport(cfg BLETransportConfig) (*BLETransport, error) {
 	if err := bluetooth.DefaultAdapter.Enable(); err != nil {
 		return nil, fmt.Errorf("enable bluetooth adapter: %w", err)
 	}
 
 	return &BLETransport{
 		adapter: bluetooth.DefaultAdapter,
+		cfg:     cfg,
 		rcv:     make(chan SMPFrame, 16),
 		cbs:     make(map[uint8]func(frame SMPFrame)),
 	}, nil
 }
 
-func (b *BLETransport) Connect(ctx context.Context, params url.Values) error {
+func (b *BLETransport) Connect(ctx context.Context) error {
 	var found bool
 	var deviceAddr bluetooth.Address
 
@@ -48,21 +55,26 @@ func (b *BLETransport) Connect(ctx context.Context, params url.Values) error {
 	defer cancel()
 
 	err := b.adapter.Scan(func(a *bluetooth.Adapter, sr bluetooth.ScanResult) {
-		// slog.Info("found ble device", "name", sr.LocalName(), "addr", sr.Address)
-		if sr.LocalName() == params.Get("name") {
-			deviceAddr = sr.Address
-			found = true
+		slog.Debug("found ble device", "name", sr.LocalName(), "addr", sr.Address)
 
-			cancel()
-			_ = b.adapter.StopScan()
+		nameMatch := b.cfg.Name != "" && sr.LocalName() == b.cfg.Name
+		addrMatch := b.cfg.Address != "" && sr.Address.String() == b.cfg.Address
+
+		if !nameMatch && !addrMatch {
 			return
 		}
+
+		deviceAddr = sr.Address
+		found = true
+
+		cancel()
+		_ = b.adapter.StopScan()
 	})
 	if err != nil {
 		return fmt.Errorf("start ble scan: %w", err)
 	}
 
-	slog.Info("started ble scan", "params", params)
+	slog.Info("started ble scan", "params", b.cfg)
 
 	<-ctx.Done()
 	_ = b.adapter.StopScan()

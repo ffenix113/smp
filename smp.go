@@ -1,8 +1,14 @@
-package simple_smp
+package smp
 
 import (
 	"fmt"
+	"sync/atomic"
 )
+
+// seqNum holds current sequence number to calculate the next one.
+//
+// FIXME: this variable should have better place.
+var seqNum atomic.Uint32
 
 // SMP Protocol Version constants
 const (
@@ -80,24 +86,30 @@ type SMPFrame struct {
 // SMP Client encapsulates the SMP communication
 type SMPClient struct {
 	transport Transport
-	seqNum    uint8
 }
 
 // NewSMPClient creates a new SMP client with the given transport
 func NewSMPClient(transport Transport) *SMPClient {
 	return &SMPClient{
 		transport: transport,
-		seqNum:    0,
 	}
 }
 
-// CreateFrame creates a new SMP frame with the specified parameters
-func (c *SMPClient) CreateFrame(op uint8, groupID uint8, commandID uint8, data []byte) SMPFrame {
-	c.seqNum++
-	if c.seqNum == 0 {
-		c.seqNum = 1
-	}
+func NextSeqNum() uint8 {
+	// This can return 0 on wrap-around,
+	// but it does not look like it should be a problem.
+	//
+	// https://docs.zephyrproject.org/latest/services/device_mgmt/smp_protocol.html#frame-the-envelope
+	return uint8(seqNum.Add(1) % 0xff)
+}
 
+// CreateFrame creates a new SMP frame with the specified parameters.
+//
+// Sequence number is generated atomically, it is not possible to change
+// how it is generated currently.
+//
+// But it is always possible to change its value on the frame before sending it.
+func CreateFrame(op uint8, groupID uint8, commandID uint8, data []byte) SMPFrame {
 	return SMPFrame{
 		Header: SMPHeader{
 			Version:     SMPVersion2,
@@ -105,7 +117,7 @@ func (c *SMPClient) CreateFrame(op uint8, groupID uint8, commandID uint8, data [
 			Flags:       0x00,
 			DataLength:  uint16(len(data)),
 			GroupID:     groupID,
-			SequenceNum: c.seqNum,
+			SequenceNum: NextSeqNum(),
 			CommandID:   commandID,
 		},
 		Data: data,

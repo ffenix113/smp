@@ -1,4 +1,4 @@
-package simple_smp
+package smp
 
 import (
 	"context"
@@ -16,7 +16,7 @@ func (c *SMPClient) ResetDevice(ctx context.Context, force bool) error {
 	}
 
 	// Create SMP frame for reset command
-	frame := c.CreateFrame(SMPOpWriteRequest, SMPGroupOS, SMPCmdReset, data)
+	frame := CreateFrame(SMPOpWriteRequest, SMPGroupOS, SMPCmdReset, data)
 
 	// Send the frame
 	response, err := c.transport.Send(ctx, frame)
@@ -30,7 +30,7 @@ func (c *SMPClient) ResetDevice(ctx context.Context, force bool) error {
 	}
 
 	// Parse response
-	resetResp, err := ParseResetResponse(response.Data)
+	resetResp, err := DecodeCBOR[ResetResponse](response.Data)
 	if err != nil {
 		return fmt.Errorf("failed to parse reset response: %v", err)
 	}

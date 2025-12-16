@@ -1,11 +1,10 @@
-package simple_smp
+package smp
 
 import (
 	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
-	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,7 +17,7 @@ type sendFn func(ctx context.Context, frame SMPFrame) error
 
 type testTransport struct {
 	closeFn   func() error
-	connectFn func(ctx context.Context, params url.Values) error
+	connectFn func(ctx context.Context) error
 	sendFn    func(ctx context.Context, frame SMPFrame) (SMPFrame, error)
 }
 
@@ -27,12 +26,24 @@ func newDefaultTestTransport() *testTransport {
 		closeFn: func() error {
 			return nil
 		},
-		connectFn: func(ctx context.Context, params url.Values) error {
+		connectFn: func(ctx context.Context) error {
 			return nil
 		},
-		sendFn: func(ctx context.Context, frame SMPFrame) (SMPFrame, error) {
-			return SMPFrame{}, nil
-		},
+		sendFn: func() func(ctx context.Context, frame SMPFrame) (SMPFrame, error) {
+			encoded, _ := EncodeCBOR(FirmwareUploadResponse{
+				Off: 1,
+			})
+
+			return func(ctx context.Context, frame SMPFrame) (SMPFrame, error) {
+				return SMPFrame{
+					Header: SMPHeader{
+						SequenceNum: frame.Header.SequenceNum,
+						DataLength:  uint16(len(encoded)),
+					},
+					Data: encoded,
+				}, nil
+			}
+		}(),
 	}
 }
 
@@ -42,8 +53,8 @@ func (t *testTransport) Close() error {
 }
 
 // Connect implements [Transport].
-func (t *testTransport) Connect(ctx context.Context, params url.Values) error {
-	return t.connectFn(ctx, params)
+func (t *testTransport) Connect(ctx context.Context) error {
+	return t.connectFn(ctx)
 }
 
 // Send implements [Transport].
@@ -51,7 +62,8 @@ func (t *testTransport) Send(ctx context.Context, frame SMPFrame) (SMPFrame, err
 	return t.sendFn(ctx, frame)
 }
 
-func TestImgChunker(t *testing.T) {
+func TestUploadWithWindows(t *testing.T) {
+	t.Parallel()
 
 	genericError := errors.New("error")
 
@@ -59,7 +71,6 @@ func TestImgChunker(t *testing.T) {
 		name        string
 		sendFn      sendFn
 		expectError error
-		// transportErrorMsg string
 	}{
 		{
 			name: "Normal upload",
@@ -103,6 +114,8 @@ func TestImgChunker(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			t.Cleanup(cancel)
 
@@ -131,8 +144,8 @@ func TestImgChunker(t *testing.T) {
 				uploadedMu.Lock()
 				defer uploadedMu.Unlock()
 
-				mp := make(map[string]any)
-				if err := DecodeCBOR(frame.Data, &mp); err != nil {
+				mp, err := DecodeCBOR[map[string]any](frame.Data)
+				if err != nil {
 					cancel()
 					t.Fatalf("decode data: %s", err.Error())
 				}
@@ -141,7 +154,7 @@ func TestImgChunker(t *testing.T) {
 				copy(uploaded[off:], mp["data"].([]byte))
 
 				encoded, _ := EncodeCBOR(FirmwareUploadResponse{
-					Off: &off,
+					Off: off,
 				})
 
 				return SMPFrame{
@@ -154,7 +167,7 @@ func TestImgChunker(t *testing.T) {
 			}
 
 			cl := NewSMPClient(transport)
-			err := cl.UploadFirmware2(ctx, dataToUpload, chunkSize, func(frame FirmwareUploadRequest) {
+			err := cl.UploadImageWithWindows(ctx, 3, dataToUpload, chunkSize, func(frame FirmwareUploadRequest) {
 				uploadedSize += uint32(len(frame.Data))
 				uploadedChunks++
 			})
@@ -187,5 +200,71 @@ func TestImgChunker(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestImgChunkerCorrectness(t *testing.T) {
+	// Other tests will verify the upload correctness with parallel chunks.
+	// This test will verify that the state of chunker is correct after upload.
+
+	t.Parallel()
+
+	ctx := context.Background()
+
+	transport := newDefaultTestTransport()
+
+	const chunkSize = 1
+	const dataSize = 1024
+	const maxAllowedWindows = 10
+
+	dataToUpload := make([]byte, dataSize)
+	if _, err := rand.Read(dataToUpload); err != nil {
+		t.Fatalf("generate data: %s", err.Error())
+	}
+
+	chunker := newChunker(transport, maxAllowedWindows, dataToUpload, chunkSize, nil)
+
+	err := chunker.run(ctx)
+	if err != nil {
+		t.Fatalf("must not error, but got one: %s", err.Error())
+	}
+
+	if maxAllowed := chunker.currentAllowedWindows.Load(); maxAllowed != maxAllowedWindows {
+		t.Fatalf("want to have %d max windows, but had %d", maxAllowedWindows, maxAllowed)
+
+	}
+
+	if w := chunker.currentWindows.Load(); w != 0 {
+		t.Fatalf("current windows must be zero, but was %d", w)
+	}
+
+	if semLen := len(chunker.sem); semLen != 0 {
+		t.Fatalf("all semaphore spots must be free, but had %d waiting", semLen)
+	}
+}
+
+func BenchmarkImgUpload(b *testing.B) {
+	ctx := context.Background()
+
+	transport := newDefaultTestTransport()
+
+	const chunkSize = 1
+	const dataSize = 1024
+	const maxAllowedWindows = 10
+
+	dataToUpload := make([]byte, dataSize)
+	if _, err := rand.Read(dataToUpload); err != nil {
+		b.Fatalf("generate data: %s", err.Error())
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		chunker := newChunker(transport, maxAllowedWindows, dataToUpload, chunkSize, nil)
+
+		if err := chunker.run(ctx); err != nil {
+			b.Fatalf("must not error, but got: %s", err.Error())
+		}
 	}
 }

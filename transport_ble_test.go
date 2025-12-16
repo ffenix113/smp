@@ -1,9 +1,7 @@
-package simple_smp
+package smp
 
 import (
 	"context"
-	"log/slog"
-	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -15,24 +13,22 @@ func TestBLETransportConnectAndReset(t *testing.T) {
 
 	// Skip test if no BLE adapter is available - this ensures the test
 	// can be run without requiring physical hardware to fail gracefully
-	// t.Skip("BLE transport test - requires physical BLE device for passing test")
+	t.Skip("BLE transport test - requires physical BLE device for passing test")
 
 	// Create a new BLE transport
-	transport, err := NewBLETransport()
+	transport, err := NewBLETransport(BLETransportConfig{
+		Name: "ZBHome nrf52dk",
+	})
 	if err != nil {
 		t.Fatalf("create ble transport: %s", err.Error())
 	}
-
-	// Define device parameters - in a real test, this would use an actual device name
-	params := url.Values{}
-	params.Set("name", "ZBHome nrf52dk")
 
 	// Create context with timeout to avoid hanging
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Try to connect to the device - this should fail gracefully without mocks
-	err = transport.Connect(ctx, params)
+	err = transport.Connect(ctx)
 	if err != nil {
 		// Test should fail gracefully when device is not found
 		t.Fatalf("Expected failure when connecting to device: %s", err.Error())
@@ -57,22 +53,25 @@ func TestBLETransportConnectAndReset(t *testing.T) {
 }
 
 func TestBLETransportUploadImg(t *testing.T) {
+	t.Skip("BLE transport test - requires physical BLE device for passing test")
+
+	const deviceName = "ZBHome nrf54l"
+	const imgPath = "~/firmware/build/firmware/zephyr/zephyr.signed.bin"
+
 	// Create a new BLE transport
-	transport, err := NewBLETransport()
+	transport, err := NewBLETransport(BLETransportConfig{
+		Name: deviceName,
+	})
 	if err != nil {
 		t.Fatalf("create ble transport: %s", err.Error())
 	}
-
-	// Define device parameters - in a real test, this would use an actual device name
-	params := url.Values{}
-	params.Set("name", "ZBHome nrf54l")
 
 	// Create context with timeout to avoid hanging
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	// Try to connect to the device - this should fail gracefully without mocks
-	err = transport.Connect(ctx, params)
+	err = transport.Connect(ctx)
 	if err != nil {
 		// Test should fail gracefully when device is not found
 		t.Fatalf("Expected failure when connecting to device: %s", err.Error())
@@ -82,7 +81,7 @@ func TestBLETransportUploadImg(t *testing.T) {
 	// Send Reset command as SMP frame - this would only work if device is actually connected
 	client := NewSMPClient(transport)
 
-	imgData, _ := os.ReadFile("/Users/ffenix/Projects/zigbee_home/_ota3/build/_ota3/zephyr/zephyr.signed.bin")
+	imgData, _ := os.ReadFile(imgPath)
 
 	var prevUploaded uint32
 	var totalUploaded uint32
@@ -95,14 +94,14 @@ func TestBLETransportUploadImg(t *testing.T) {
 
 			speed := float64(sizeDiff) / 1024 / 2
 
-			slog.Info("uploaded chunk", "totalBytes", totalUploaded, "speed", speed)
+			t.Logf("uploaded chunk, totalBytes: %d, speed: %.02f", totalUploaded, speed)
 
 			time.Sleep(2 * time.Second)
 		}
 	}()
 
 	const chunkSize = 320
-	err = client.UploadFirmware2(ctx, imgData, chunkSize, func(req FirmwareUploadRequest) {
+	err = client.UploadImageWithWindows(ctx, 5, imgData, chunkSize, func(req FirmwareUploadRequest) {
 		totalUploaded += uint32(len(req.Data))
 	})
 	if err != nil {

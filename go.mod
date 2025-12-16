@@ -1,4 +1,4 @@
-module simple_smp
+module github.com/ffenix113/smp
 
 go 1.22.1
 
